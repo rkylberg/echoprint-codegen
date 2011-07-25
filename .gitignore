@@ -12,6 +12,9 @@ project.xcworkspace
 xcuserdata
 instruments
 
+# project relative derived build data
+DerivedData
+
 # osx noise
 .DS_Store
 profile
