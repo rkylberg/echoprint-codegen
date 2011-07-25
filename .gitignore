@@ -1,3 +1,17 @@
 *.o
 *.dylib
 *.so
+*.a
+
+# xcode noise
+*.build
+*.pbxuser
+*.perspective*
+*.mode1*
+project.xcworkspace
+xcuserdata
+instruments
+
+# osx noise
+.DS_Store
+profile
