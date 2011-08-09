@@ -13,82 +13,65 @@ extern "C" {
 
 extern void NSLog(CFStringRef format, ...); 
 
-const char * GetPCMFromFile(char * filename) {
-	CFURLRef audioFileURL = CFURLCreateFromFileSystemRepresentation(NULL,(const UInt8*)filename, strlen(filename), false);
-	ExtAudioFileRef outExtAudioFile;
-	int err = ExtAudioFileOpenURL(audioFileURL, &outExtAudioFile);
+const char* GetPCMFromFile(char* filename) {
+  // refactored based on gist: https://gist.github.com/1073528
+  // ref: https://groups.google.com/d/topic/echoprint/oNkeS0UbEqI/discussion
+  
+	// open the input mp3 file as an ExtAudioFile for reading and converting:
+	CFURLRef inputFileURL = CFURLCreateFromFileSystemRepresentation(NULL,(const UInt8*)filename, strlen(filename), false);
+	ExtAudioFileRef inputFileRef;
+	int err = ExtAudioFileOpenURL(inputFileURL, &inputFileRef);
 	if (err) {
-		NSLog(CFSTR("open failed")); 
-	}
-
+    NSLog(CFSTR("ERROR: Failed to open audio input file"));
+    return nil;
+  }
+  
+	// setup an mono LPCM format description for conversion & set as the input file's client format
+	Float64 sampleRate = 11025;
+	CAStreamBasicDescription outputFormat;
+	outputFormat.mSampleRate = sampleRate;
+	outputFormat.mFormatID = kAudioFormatLinearPCM;
+	outputFormat.mChannelsPerFrame = 1;
+	outputFormat.mBitsPerChannel = 32;
+	outputFormat.mBytesPerPacket = outputFormat.mBytesPerFrame = 4 * outputFormat.mChannelsPerFrame;
+	outputFormat.mFramesPerPacket = 1;
+	outputFormat.mFormatFlags =  kAudioFormatFlagsNativeFloatPacked;// | kAudioFormatFlagIsNonInterleaved;
 	
-	CAStreamBasicDescription clientFormat;
-	clientFormat.mSampleRate = 11025;
-	clientFormat.mFormatID = kAudioFormatLinearPCM;
-	clientFormat.mChannelsPerFrame = 2;
-	clientFormat.mBitsPerChannel = 32;
-	clientFormat.mBytesPerPacket = clientFormat.mBytesPerFrame = 4 * clientFormat.mChannelsPerFrame;
-	clientFormat.mFramesPerPacket = 1;
-	clientFormat.mFormatFlags =  kAudioFormatFlagsNativeFloatPacked;// | kAudioFormatFlagIsNonInterleaved;
+	err = ExtAudioFileSetProperty(inputFileRef, kExtAudioFileProperty_ClientDataFormat, sizeof(outputFormat), &outputFormat);
+	if (err) {
+    NSLog(CFSTR("ERROR: On set format %d"), err);
+    return nil;
+  }
+  
+	// read the first 30 seconds of the file into a buffer
+	int secondsToDecode = 30;
+	UInt32 lpcm30SecondsBufferSize = sizeof(Float32) * sampleRate * secondsToDecode; // for mono, multi channel would require * ChannelsPerFrame
+	Float32* lpcm30SecondsBuffer = (Float32 *)malloc(lpcm30SecondsBufferSize);
+  
+	AudioBufferList audioBufferList;
+	audioBufferList.mNumberBuffers = 1;
+	audioBufferList.mBuffers[0].mNumberChannels = 1;
+	audioBufferList.mBuffers[0].mDataByteSize = lpcm30SecondsBufferSize;
+	audioBufferList.mBuffers[0].mData = lpcm30SecondsBuffer;
 	
-	int size = sizeof(clientFormat);
-	err = ExtAudioFileSetProperty(outExtAudioFile, kExtAudioFileProperty_ClientDataFormat, size, &clientFormat);
-	if (err) 
-		NSLog(CFSTR("err on set format %d"), err);
-	
-	int seconds_to_decode = 30;
-	int bytes_for_bigbuf = sizeof(float)*11025*seconds_to_decode;
-	float *bigBuf = (float*) malloc(bytes_for_bigbuf);
-	if(bigBuf == NULL) {
-		NSLog(CFSTR("Error mallocing bigbuf"));
-	}
-	int totalFrames = 0;
-	while (1) {
-		AudioBufferList fillBufList;
-		fillBufList.mNumberBuffers = 1;
-		UInt32 bufferByteSize = 11025 * 4 * 2; // 1s of audio
-		char srcBuffer[bufferByteSize];
-		UInt32 numFrames = clientFormat.BytesToFrames(bufferByteSize); // (bufferByteSize / clientFormat.mBytesPerFrame);
+	UInt32 numberOfFrames = sampleRate * secondsToDecode; 
+	NSLog(CFSTR("INFO: Expect to read %d frames"), numberOfFrames);
+  err = ExtAudioFileRead(inputFileRef, &numberOfFrames, &audioBufferList);
+  if (err) {
+    NSLog(CFSTR("ERROR: File read conversion failed"));
+    return nil;
+  }
+	NSLog(CFSTR("INFO: Actually read %d frames"), numberOfFrames);
 
-		fillBufList.mBuffers[0].mNumberChannels = clientFormat.NumberChannels();
-		fillBufList.mBuffers[0].mDataByteSize = bufferByteSize;
-		fillBufList.mBuffers[0].mData = srcBuffer;
-		err = ExtAudioFileRead(outExtAudioFile, &numFrames, &fillBufList);	
-		if (err) { 
-			NSLog(CFSTR("err on read %d"), err);
-			totalFrames = 0;
-			break;
-		}
-		if (!numFrames)
-			break;
-		
-		float mono_version[numFrames];
-		float* float_buf = (float*) fillBufList.mBuffers[0].mData;
-		for(int i=0;i<numFrames;i++)
-			mono_version[i] = (float_buf[i*2] + float_buf[i*2 + 1]) / 2.0;
-		
-		int bytesLeftInBuffer = bytes_for_bigbuf - (totalFrames * sizeof(float));
-		
-		if (numFrames * sizeof(float) > bytesLeftInBuffer) {
-			memcpy(bigBuf + totalFrames, mono_version, bytesLeftInBuffer);
-			totalFrames = totalFrames + (bytesLeftInBuffer/4);
-			break;
-		} else {
-			memcpy(bigBuf + totalFrames, mono_version, numFrames * sizeof(float));
-			totalFrames = totalFrames + numFrames;
-		}
-	}
+	const char* fingerprint = "";
+  NSLog(CFSTR("Doing codegen on %d samples..."), numberOfFrames);
+  fingerprint = codegen_wrapper(lpcm30SecondsBuffer,	numberOfFrames);
+  NSLog(CFSTR("Done with codegen"));
+  
+	free(lpcm30SecondsBuffer);
+	ExtAudioFileDispose(inputFileRef);
 
-	const char * what = "";
-	if(totalFrames > 11025) {
-		NSLog(CFSTR("Doing codegen on %d samples..."), totalFrames);
-		what = codegen_wrapper(bigBuf,	totalFrames);
-		NSLog(CFSTR("Done with codegen"));
-
-	}
-	free(bigBuf);
-
-	return what;
+	return fingerprint;
 }
 
 
